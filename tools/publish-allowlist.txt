@@ -12,6 +12,7 @@ tests/**/*.py
 tools/publish_check.py
 tools/publish-allowlist.txt
 .githooks/*
+.github/workflows/test.yml
 docs/getting-started.md
 docs/getting-started.ja.md
 docs/scan.md
