@@ -12,7 +12,18 @@ jobs:
         with: {persist-credentials: false}
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with: {python-version: "3.14"}
+      - name: Install gitleaks v8.30.1
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'gitleaks.zip'
+          Invoke-WebRequest -Uri 'https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_windows_x64.zip' -OutFile $zip
+          if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -ne 'd29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e') {
+            throw 'gitleaks SHA256 mismatch'
+          }
+          $dir = Join-Path $env:RUNNER_TEMP 'gitleaks'
+          Expand-Archive -LiteralPath $zip -DestinationPath $dir
+          [IO.File]::AppendAllText($env:GITHUB_PATH, "$dir`n", [Text.UTF8Encoding]::new($false))
+          & (Join-Path $dir 'gitleaks.exe') version
       - run: python -m unittest discover -s tests -q
-        env: {PYTHONPATH: src}
+        env: {PYTHONPATH: src, PATCHWAIT_REQUIRE_HOOK_TESTS: "1"}
       - run: python -m pip install pyright==1.1.414
       - run: pyright
