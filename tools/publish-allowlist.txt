@@ -1,0 +1,24 @@
+# Paths that may be published. One glob per line; `**` matches any number of
+# directories, `*` and `?` stay inside one path segment. Everything else is
+# rejected by tools/publish_check.py. Internal files are rejected even if a
+# pattern here would match them.
+LICENSE
+README.md
+README.ja.md
+pyproject.toml
+.gitignore
+src/patchwait/**/*.py
+tests/**/*.py
+tools/publish_check.py
+tools/publish-allowlist.txt
+.githooks/*
+docs/getting-started.md
+docs/getting-started.ja.md
+docs/scan.md
+docs/scan.ja.md
+docs/roots.md
+docs/roots.ja.md
+docs/ledger-and-waitlist.md
+docs/ledger-and-waitlist.ja.md
+docs/undetermined-reasons.md
+docs/undetermined-reasons.ja.md
