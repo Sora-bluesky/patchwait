@@ -1,0 +1,27 @@
+name: Release
+on: {push: {tags: ["v*"]}, workflow_dispatch: {inputs: {tag: {description: Existing release tag, required: true, type: string}}}}
+permissions: {}
+concurrency: {group: "release-${{ inputs.tag || github.ref_name }}", cancel-in-progress: false}
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {contents: write, id-token: write, attestations: write}
+    env: {TAG: "${{ inputs.tag || github.ref_name }}"}
+    defaults: {run: {shell: bash}}
+    steps:
+      - run: '[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]'
+      - {name: Read build pins from the workflow revision for older tags, uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1, with: {ref: "${{ github.workflow_sha }}", persist-credentials: false}} # v7.0.1
+      - run: cp .github/release-requirements.txt "$RUNNER_TEMP/release-requirements.txt"
+      - {uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1, with: {ref: "refs/tags/${{ env.TAG }}", persist-credentials: false, fetch-depth: 0}} # v7.0.1
+      - run: tag_commit=$(git rev-parse --verify "refs/tags/$TAG^{commit}"); test "$(git rev-parse HEAD)" = "$tag_commit"; echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct "$tag_commit")" >> "$GITHUB_ENV"; echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+      - {uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0, with: {python-version: "3.14"}} # v7.1.0
+      - run: PYTHONPATH=src python -c 'import os, tomllib; from pathlib import Path; from patchwait import __version__; tag = os.environ["TAG"]; version = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]; raise SystemExit(0 if tag == "v" + version == "v" + __version__ else "Tag/package version mismatch")'
+      - run: >-
+          mkdir -p .github; cp "$RUNNER_TEMP/release-requirements.txt" .github/release-requirements.txt; python -m pip install --require-hashes --only-binary :all: -r .github/release-requirements.txt
+      - run: python -m build --sdist --wheel --no-isolation --outdir dist
+      - run: shopt -s dotglob nullglob; files=(dist/*); wheels=(dist/patchwait-"$VERSION"-*.whl); [[ ${#files[@]} == 2 && -f "dist/patchwait-$VERSION.tar.gz" && ${#wheels[@]} == 1 && -f "${wheels[0]}" ]]
+      - {uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8, with: {subject-path: dist/*}} # v4.2.2
+      - run: (cd dist && sha256sum -- *) > SHA256SUMS
+      - run: if gh release view "$TAG" >/dev/null 2>&1; then echo "Release already exists" >&2; exit 1; fi; gh release create "$TAG" dist/* SHA256SUMS --draft --verify-tag --title "patchwait $VERSION" --notes "Release notes will be added before publishing."
+        env: {GH_TOKEN: "${{ github.token }}"}
