@@ -604,9 +604,11 @@ class AllowlistTests(unittest.TestCase):
 SH = shutil.which("sh")
 
 
-@unittest.skipUnless(HAS_GIT and SH and HAS_GITLEAKS, "git, sh or gitleaks is not on PATH")
 class HookTests(RepoCase):
     def setUp(self) -> None:
+        self.require_prerequisite(HAS_GIT, "git is not on PATH")
+        self.require_prerequisite(SH is not None, "sh is not on PATH")
+        self.require_prerequisite(HAS_GITLEAKS, "gitleaks is not on PATH")
         super().setUp()
         hooks = os.path.join(self.tmp, "repo-hooks")
         shutil.copytree(HOOKS, hooks)
@@ -630,6 +632,12 @@ class HookTests(RepoCase):
             )
             os.chmod(path, 0o755)
         self.write_file(self.global_cfg, f"[core]\n\thooksPath = {gdir.replace(chr(92), '/')}\n")
+
+    def require_prerequisite(self, condition: bool, reason: str) -> None:
+        if not condition:
+            if os.environ.get("PATCHWAIT_REQUIRE_HOOK_TESTS") == "1":
+                self.fail(reason)
+            self.skipTest(reason)
 
     def commit_with_hook(self, rc: str, message: str = "msg", env: dict[str, str] | None = None) -> tuple[int, str]:
         env = dict(env or self.env, FAKE_GLOBAL_RC=rc)
@@ -792,12 +800,13 @@ class HookTests(RepoCase):
             os.path.exists(os.path.join(d, n)) for n in ("gitleaks", "gitleaks.exe"))]
         env = dict(self.env, PATH=os.pathsep.join(kept))
         found = [shutil.which(n, path=env["PATH"]) for n in ("git", "sh", "gitleaks")]
-        if found[0] is None or found[1] is None or found[2] is not None:
-            self.skipTest("cannot build a PATH without gitleaks that keeps git and sh")
+        self.require_prerequisite(
+            found[0] is not None and found[1] is not None and found[2] is None,
+            "cannot build a PATH without gitleaks that keeps git and sh",
+        )
         self.stage("src/a.py", b"ok\n")
         rc, out = self.commit_with_hook("0", env=env)
-        if "no Python interpreter found" in out:
-            self.skipTest("Python is only reachable next to gitleaks")
+        self.require_prerequisite("no Python interpreter found" not in out, "Python is only reachable next to gitleaks")
         self.assertNotEqual(rc, 0)
         self.assertIn("gitleaks is not on PATH; rejecting (fail closed)", out)
 

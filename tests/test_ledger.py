@@ -756,11 +756,11 @@ class OutOverInputTests(LedgerCase):
         with open(source, "rb") as handle:
             before = handle.read()
         other = self.write_doc("r.json", roots_doc())
-        spellings = [source, os.path.join(self.dir, ".", "s.json"), os.path.relpath(source)]
+        spellings = [source, os.path.join(self.dir, ".", "s.json"), "s.json"]
         if os.name == "nt":
             spellings.append(source.upper())
         for out in spellings:
-            with self.subTest(out=out):
+            with self.subTest(out=out), contextlib.chdir(self.dir):
                 code, stdout, err = self.run_cli("ledger", "--out", out, other, source)
                 self.assertEqual((code, stdout), (2, ""))
                 self.assertIn("--out names this input", err)
