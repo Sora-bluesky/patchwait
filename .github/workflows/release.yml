@@ -1,27 +1,135 @@
 name: Release
-on: {push: {tags: ["v*"]}, workflow_dispatch: {inputs: {tag: {description: Existing release tag, required: true, type: string}}}}
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag
+        required: true
+        type: string
 permissions: {}
-concurrency: {group: "release-${{ inputs.tag || github.ref_name }}", cancel-in-progress: false}
+concurrency:
+  group: "release-${{ inputs.tag || github.ref_name }}"
+  cancel-in-progress: false
 jobs:
   release:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions: {contents: write, id-token: write, attestations: write}
-    env: {TAG: "${{ inputs.tag || github.ref_name }}"}
-    defaults: {run: {shell: bash}}
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      TAG: "${{ inputs.tag || github.ref_name }}"
+    defaults:
+      run:
+        shell: bash
     steps:
-      - run: '[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]'
-      - {name: Read build pins from the workflow revision for older tags, uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1, with: {ref: "${{ github.workflow_sha }}", persist-credentials: false}} # v7.0.1
-      - run: cp .github/release-requirements.txt "$RUNNER_TEMP/release-requirements.txt"
-      - {uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1, with: {ref: "refs/tags/${{ env.TAG }}", persist-credentials: false, fetch-depth: 0}} # v7.0.1
-      - run: tag_commit=$(git rev-parse --verify "refs/tags/$TAG^{commit}"); test "$(git rev-parse HEAD)" = "$tag_commit"; echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct "$tag_commit")" >> "$GITHUB_ENV"; echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
-      - {uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0, with: {python-version: "3.14"}} # v7.1.0
-      - run: PYTHONPATH=src python -c 'import os, tomllib; from pathlib import Path; from patchwait import __version__; tag = os.environ["TAG"]; version = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]; raise SystemExit(0 if tag == "v" + version == "v" + __version__ else "Tag/package version mismatch")'
-      - run: >-
-          mkdir -p .github; cp "$RUNNER_TEMP/release-requirements.txt" .github/release-requirements.txt; python -m pip install --require-hashes --only-binary :all: -r .github/release-requirements.txt
-      - run: python -m build --sdist --wheel --no-isolation --outdir dist
-      - run: shopt -s dotglob nullglob; files=(dist/*); wheels=(dist/patchwait-"$VERSION"-*.whl); [[ ${#files[@]} == 2 && -f "dist/patchwait-$VERSION.tar.gz" && ${#wheels[@]} == 1 && -f "${wheels[0]}" ]]
-      - {uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8, with: {subject-path: dist/*}} # v4.2.2
-      - run: (cd dist && sha256sum -- *) > SHA256SUMS
-      - run: if gh release view "$TAG" >/dev/null 2>&1; then echo "Release already exists" >&2; exit 1; fi; gh release create "$TAG" dist/* SHA256SUMS --draft --verify-tag --title "patchwait $VERSION" --notes "Release notes will be added before publishing."
-        env: {GH_TOKEN: "${{ github.token }}"}
+      - name: Validate the release tag before checkout
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+      - name: Read build pins from the workflow revision for older tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: "${{ github.workflow_sha }}"
+          persist-credentials: false
+      - name: Preserve the hash-pinned build requirements
+        run: |
+          cp .github/release-requirements.txt "$RUNNER_TEMP/release-requirements.txt"
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: "refs/tags/${{ env.TAG }}"
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify the checked-out commit and set build metadata
+        run: |
+          set -euo pipefail
+          tag_commit=$(git rev-parse --verify "refs/tags/$TAG^{commit}")
+          test "$(git rev-parse HEAD)" = "$tag_commit"
+          echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct "$tag_commit")" >> "$GITHUB_ENV"
+          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+      - name: Set up Python 3.14
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+      - name: Verify the tag and package versions
+        run: |
+          PYTHONPATH=src python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          from patchwait import __version__
+
+          tag = os.environ["TAG"]
+          version = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+          if not tag == "v" + version == "v" + __version__:
+              raise SystemExit("Tag/package version mismatch")
+          PY
+      - name: Refuse to overwrite an existing release
+        run: |
+          set -euo pipefail
+          if release_response=$(gh api --include --silent "repos/$GITHUB_REPOSITORY/releases/tags/$TAG"); then
+            echo "Release already exists" >&2
+            exit 1
+          fi
+          status_line=${release_response%%$'\n'*}
+          if [[ ! "$status_line" =~ ^HTTP/[0-9.]+[[:space:]]404([[:space:]]|$) ]]; then
+            echo "Could not determine whether the release exists" >&2
+            exit 1
+          fi
+        env:
+          GH_TOKEN: "${{ github.token }}"
+      - name: Install the hash-pinned build dependencies
+        run: |
+          set -euo pipefail
+          mkdir -p .github
+          cp "$RUNNER_TEMP/release-requirements.txt" .github/release-requirements.txt
+          python -m pip install --require-hashes --only-binary :all: -r .github/release-requirements.txt
+      - name: Build the source and wheel distributions
+        run: |
+          python -m build --sdist --wheel --no-isolation --outdir dist
+      - name: Validate the distribution filenames
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          from packaging.utils import parse_sdist_filename, parse_wheel_filename
+          from packaging.version import Version
+
+          files = list(Path("dist").iterdir())
+          sdists = [path for path in files if path.name.endswith(".tar.gz")]
+          wheels = [path for path in files if path.suffix == ".whl"]
+          if len(files) != 2 or len(sdists) != 1 or len(wheels) != 1:
+              raise SystemExit("Expected exactly one sdist and one wheel in dist/")
+          if not all(path.is_file() for path in files):
+              raise SystemExit("Expected distribution files in dist/")
+
+          expected_version = Version(os.environ["VERSION"])
+          sdist_name, sdist_version = parse_sdist_filename(sdists[0].name)
+          wheel_name, wheel_version, _, _ = parse_wheel_filename(wheels[0].name)
+          if sdist_name != "patchwait" or wheel_name != "patchwait":
+              raise SystemExit("Distribution project name mismatch")
+          if sdist_version != expected_version or wheel_version != expected_version:
+              raise SystemExit("Distribution version mismatch")
+          PY
+      - name: Attest the build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+      - name: Generate SHA256 checksums
+        run: |
+          set -euo pipefail
+          (
+            cd dist
+            sha256sum -- *
+          ) > SHA256SUMS
+      - name: Create a draft release
+        run: |
+          gh release create "$TAG" dist/* SHA256SUMS --draft --verify-tag --title "patchwait $VERSION" --notes "Release notes will be added before publishing."
+        env:
+          GH_TOKEN: "${{ github.token }}"
