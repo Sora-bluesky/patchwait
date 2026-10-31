@@ -13,6 +13,8 @@ tools/publish_check.py
 tools/publish-allowlist.txt
 .githooks/*
 .github/workflows/test.yml
+.github/workflows/release.yml
+.github/release-requirements.txt
 docs/getting-started.md
 docs/getting-started.ja.md
 docs/scan.md
