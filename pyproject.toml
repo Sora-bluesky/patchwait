@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "patchwait"
-version = "0.2.1"
+version = "0.2.2"
 description = "Inventory runtimes bundled in Windows applications and track items waiting on a vendor fix."
 requires-python = ">=3.11"
 license = "MIT"
