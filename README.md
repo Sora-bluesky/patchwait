@@ -14,7 +14,7 @@ patchwait reads versions and looks for the certificates you supply in these plac
 | Result | Meaning |
 |---|---|
 | `found` | A runtime is below its supplied minimum, or a certificate or key matches. For roots, read the item's `role`. |
-| `not_found` | The comparison found no runtime below its minimum, or no matching certificate or key within the check's limits. One exception: an AuthRoot entry with Microsoft's "disallowed since" property is `not_found` even though it matches (see [roots](docs/roots.md)). |
+| `not_found` | The comparison found no runtime below its minimum, or no matching certificate or key within the check's limits. One exception: an AuthRoot entry with a date in Microsoft's "disallowed since" property is `not_found` even though it matches. An empty value stays `found`, and any other unreadable value is `undetermined` (see [roots](docs/roots.md)). |
 | `undetermined` | A file was unreadable, a version could not be parsed, or the check lacked usable data. The item includes a reason. |
 
 `version-of` reads one file and has [its own exit codes](docs/scan.md#version-of-exit-codes).
