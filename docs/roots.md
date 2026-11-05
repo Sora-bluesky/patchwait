@@ -86,7 +86,8 @@ Lines with the same label are merged into one entry, and both options can be use
 
 PEM reading accepts `CERTIFICATE`, `TRUSTED CERTIFICATE`, and `X509 CERTIFICATE` labels.
 The BEGIN and END labels must match.
-For `TRUSTED CERTIFICATE`, trust settings are ignored. Only the certificate is matched.
+For `TRUSTED CERTIFICATE`, optional trailing trust settings must have the X509_CERT_AUX structure.
+Malformed settings count as a malformed certificate. Only the certificate is matched; the settings do not affect matching.
 
 - `--pem FILE` and `--pem-root DIR` read PEM bundles, or a single DER certificate.
   `--pem-root` walks for `*.pem`, `*.crt`, `*.cer`, `cacert*`, `roots.pem` and `ca-bundle*`, and does not follow symbolic links or junctions to directories below the root (they are counted in `skipped_reparse_points`).
