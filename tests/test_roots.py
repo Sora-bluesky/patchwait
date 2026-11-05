@@ -23,8 +23,6 @@ from patchwait.roots import (
     MAX_DER_CANDIDATE,
     MAX_DER_FILE,
     MAX_PEM_BODY,
-    PEM_BEGIN,
-    PEM_END,
     DistrustEntry,
     RootsItem,
     RootsUsageError,
@@ -46,6 +44,7 @@ from tests.cert_builder import (
     disallowed_attribute,
     not_before_attribute,
     pem,
+    seq,
     spki_of,
     subject_for,
 )
@@ -56,6 +55,8 @@ BAD = build_cert("Synthetic Distrusted Root G3", KEY_BAD, serial=3)
 REISSUED = build_cert("Synthetic Distrusted Root G3", KEY_BAD, serial=4, issuer="Synthetic Cross Signer")
 OTHER = build_cert("Synthetic Other Root", KEY_OTHER, serial=5)
 WHEN = datetime.datetime(2026, 4, 15, 0, 0, 0, tzinfo=datetime.timezone.utc)
+PEM_BEGIN = b"-----BEGIN CERTIFICATE-----"
+PEM_END = b"-----END CERTIFICATE-----"
 
 
 def sha256(data: bytes) -> str:
@@ -193,6 +194,28 @@ class DistrustListTests(RootsCase):
         self.assertEqual(entry.sha1, hashlib.sha1(BAD).digest())
         self.assertEqual(entry.spki_der, spki_of(KEY_BAD))
         self.assertEqual(entry.der, BAD)
+
+    def test_distrust_pem_size_limit(self) -> None:
+        first, last = pem(OTHER), pem(BAD)
+        for cut in (0, 12):
+            with self.subTest(cut=cut):
+                data = first + b"\n" * (MAX_DER_FILE - len(first) - cut) + last
+                path = self.write("oversized.pem", data)
+                with self.assertRaises(RootsUsageError) as caught:
+                    load_distrust([], [path])
+                message = str(caught.exception)
+                for text in ("--distrust-pem", repr(path), str(MAX_DER_FILE)):
+                    self.assertIn(text, message)
+                code, _doc = self.run_roots("--distrust-pem", path, "--pem", path)
+                self.assertEqual(code, 2)
+        data = first + b"\n" * (MAX_DER_FILE - len(first) - len(last)) + last
+        self.assertEqual(len(data), MAX_DER_FILE)
+        path = self.write("at-limit.pem", data)
+        entries = load_distrust([], [path])
+        self.assertEqual([entry.der for entry in entries], [OTHER, BAD])
+        code, doc = self.run_roots("--distrust-pem", path, "--pem", path)
+        self.assertEqual(code, 10)
+        self.assertEqual([self.verdict(item)["result"] for item in self.items(doc)], ["found", "found"])
 
     def test_bad_lists_are_usage_errors(self) -> None:
         for text in ("nothex Label\n", "sha1:abcd short\n", f"{sha256(BAD)} L\n{sha256(OTHER)} L\n"):
@@ -389,6 +412,144 @@ class PemTests(RootsCase):
         self.assertEqual(verdict["result"], "found")
 
 
+class PemLabelTests(RootsCase):
+    def test_mixed_labels_find_the_second_certificate(self) -> None:
+        for label, tail in ((b"TRUSTED CERTIFICATE", seq()), (b"X509 CERTIFICATE", b"")):
+            with self.subTest(label=label):
+                path = self.write("tree/roots.pem", pem(OTHER) + pem(BAD + tail).replace(b"CERTIFICATE", label))
+                (item,) = audit_pem(path, load_distrust([self.list_path], []))
+                self.assertEqual(item.verdict, Found(("sha256",)))
+                self.assertEqual(item.details, {"pem_blocks": 2, "certs": 2, "malformed": 0})
+                self.assertEqual(item.matches[0]["cert_sha256"], sha256(BAD))
+                for option, target in (("--pem", path), ("--pem-root", os.path.dirname(path))):
+                    code, doc = self.run_roots("--distrust", self.list_path, option, target)
+                    self.assertEqual(code, 10)
+                    self.assertEqual(self.only(doc)[1]["result"], "found")
+
+    def test_single_labels_and_mixed_distrust_pem(self) -> None:
+        for label in (b"TRUSTED CERTIFICATE", b"X509 CERTIFICATE"):
+            with self.subTest(label=label):
+                path = self.write("single.pem", pem(BAD).replace(b"CERTIFICATE", label))
+                code, doc = self.run_roots("--distrust", self.list_path, "--pem", path)
+                self.assertEqual(code, 10)
+                self.assertEqual(self.only(doc)[1]["result"], "found")
+                (entry,) = load_distrust([], [path])
+                self.assertEqual(entry.der, BAD)
+        third = build_cert("Synthetic Third Root", KEY_OTHER[::-1], serial=6)
+        data = (
+            pem(OTHER) + pem(BAD + seq()).replace(b"CERTIFICATE", b"TRUSTED CERTIFICATE")
+            + pem(third).replace(b"CERTIFICATE", b"X509 CERTIFICATE")
+        )
+        entries = load_distrust([], [self.write("mixed.pem", data)])
+        self.assertEqual([entry.der for entry in entries], [OTHER, BAD, third])
+        self.assertEqual([entry.sha256 for entry in entries], [hashlib.sha256(der).digest() for der in (OTHER, BAD, third)])
+
+    def test_trusted_certificate_aux_is_not_part_of_the_hash(self) -> None:
+        entries = load_distrust([self.list_path], [])
+        for aux in (b"", seq(), seq(seq())):
+            with self.subTest(aux=aux):
+                path = self.write("trusted.pem", pem(BAD + aux).replace(b"CERTIFICATE", b"TRUSTED CERTIFICATE"))
+                (item,) = audit_pem(path, entries)
+                self.assertEqual(item.verdict, Found(("sha256",)))
+                self.assertEqual(item.matches[0]["cert_sha256"], sha256(BAD))
+                (entry,) = load_distrust([], [path])
+                self.assertEqual(entry.der, BAD)
+
+    def test_trusted_certificate_in_binary(self) -> None:
+        path = self.write("app.exe", b"MZ\0" + pem(BAD + seq()).replace(b"CERTIFICATE", b"TRUSTED CERTIFICATE"))
+        code, doc = self.run_roots("--distrust", self.list_path, "--binary", path)
+        self.assertEqual(code, 10)
+        item, verdict = self.only(doc)
+        self.assertEqual(verdict, {"result": "found", "value": ["sha256"]})
+        self.assertEqual(item["details"], binary_details(pem_blocks=1, certs=1))
+
+    def test_invalid_tails_are_malformed(self) -> None:
+        cases = [
+            (label, tail) for label in (b"CERTIFICATE", b"X509 CERTIFICATE") for tail in (b"garbage", seq())
+        ]
+        cases += [
+            (b"TRUSTED CERTIFICATE", tail)
+            for tail in (b"garbage", seq() + b"garbage", seq() + seq(), b"\x04\x00", b"\x30\x02\x00")
+        ]
+        for label, tail in cases:
+            with self.subTest(label=label, tail=tail):
+                path = self.write("bad.pem", pem(OTHER) + pem(BAD + tail).replace(b"CERTIFICATE", label))
+                code, doc = self.run_roots("--distrust", self.list_path, "--pem", path)
+                self.assertEqual(code, 0)
+                item, verdict = self.only(doc)
+                self.assertEqual(verdict["result"], "undetermined")
+                self.assertEqual(verdict["reason"], Reason.MALFORMED_CERT.value)
+                self.assertEqual(item["details"], {"pem_blocks": 2, "certs": 1, "malformed": 1})
+                with self.assertRaises(RootsUsageError):
+                    load_distrust([], [path])
+
+    def test_missing_and_mismatched_end_labels_are_malformed(self) -> None:
+        labels = (b"CERTIFICATE", b"TRUSTED CERTIFICATE", b"X509 CERTIFICATE")
+        for label in labels:
+            for end_label in (*labels, None):
+                if end_label == label:
+                    continue
+                with self.subTest(label=label, end_label=end_label):
+                    block = pem(BAD).replace(b"-----BEGIN CERTIFICATE-----", b"-----BEGIN " + label + b"-----")
+                    end = b"-----END " + end_label + b"-----" if end_label is not None else b""
+                    block = block.replace(b"-----END CERTIFICATE-----", end)
+                    path = self.write("bad.pem", pem(OTHER) + block)
+                    code, doc = self.run_roots("--distrust", self.list_path, "--pem", path)
+                    self.assertEqual(code, 0)
+                    item, verdict = self.only(doc)
+                    self.assertEqual(verdict["result"], "undetermined")
+                    self.assertEqual(verdict["reason"], Reason.MALFORMED_CERT.value)
+                    self.assertEqual(item["details"], {"pem_blocks": 2, "certs": 1, "malformed": 1})
+
+    def test_empty_templates_for_each_label(self) -> None:
+        for label in (b"CERTIFICATE", b"TRUSTED CERTIFICATE", b"X509 CERTIFICATE"):
+            with self.subTest(label=label):
+                block = b"-----BEGIN " + label + b"-----\n\0\\n\t-----END " + label + b"-----\n"
+                path = self.write("empty.pem", block + pem(OTHER))
+                code, doc = self.run_roots("--distrust", self.list_path, "--pem", path)
+                self.assertEqual(code, 0)
+                item, verdict = self.only(doc)
+                self.assertEqual(verdict["result"], "not_found")
+                self.assertEqual(item["details"], {
+                    "pem_blocks": 2, "certs": 1, "malformed": 0,
+                    "ignored_pem_blocks": [{"offset": 0, "reason": "empty_pem_block"}],
+                })
+                with self.assertRaises(RootsUsageError):
+                    load_distrust([], [path])
+
+    def test_mixed_labels_across_small_chunks_are_counted_once(self) -> None:
+        third = build_cert("Synthetic Third Root", KEY_OTHER[::-1], serial=6)
+        blocks = (
+            pem(OTHER), pem(BAD + seq()).replace(b"CERTIFICATE", b"TRUSTED CERTIFICATE"),
+            pem(third).replace(b"CERTIFICATE", b"X509 CERTIFICATE"),
+        )
+        entries = [
+            DistrustEntry(str(index), sha256=hashlib.sha256(der).digest())
+            for index, der in enumerate((OTHER, BAD, third))
+        ]
+        path = self.write("mixed.pem", b"\0" * 7 + b"".join(blocks) + b"\0" * (MAX_PEM_BODY + 128))
+        for chunk_size in range(1, 65):
+            with self.subTest(chunk_size=chunk_size):
+                items = audit_pem(path, entries, chunk_size=chunk_size)
+                for item in items:
+                    self.assertEqual(item.verdict, Found(("sha256",)))
+                    self.assertEqual(len(item.matches), 1)
+                    self.assertEqual(item.details, {"pem_blocks": 3, "certs": 3, "malformed": 0})
+
+    def test_longest_block_across_a_chunk_boundary(self) -> None:
+        begin, end = b"-----BEGIN TRUSTED CERTIFICATE-----", b"-----END TRUSTED CERTIFICATE-----"
+        body = pem(BAD + seq()).split(PEM_BEGIN, 1)[1].split(PEM_END, 1)[0]
+        block = begin + body + b"\n" * (MAX_PEM_BODY - len(body)) + end
+        path = self.write("long.pem", b"\n" * 7 + block + b"\n" * 128)
+        entries = load_distrust([self.list_path], [])
+        for chunk_size in range(len(block) + 1, len(block) + 17):
+            with self.subTest(chunk_size=chunk_size):
+                (item,) = audit_pem(path, entries, chunk_size=chunk_size)
+                self.assertEqual(item.verdict, Found(("sha256",)))
+                self.assertEqual(len(item.matches), 1)
+                self.assertEqual(item.details, {"pem_blocks": 1, "certs": 1, "malformed": 0})
+
+
 class BinaryTests(RootsCase):
     def test_pem_with_real_newlines_and_escaped_newlines(self) -> None:
         real = self.write("a.exe", b"MZ\0\0" + os.urandom(500) + pem(BAD) + b"\0" * 100)
@@ -540,7 +701,10 @@ class BinaryTests(RootsCase):
     def test_pem_begin_at_every_offset_around_a_window_edge(self) -> None:
         # A BEGIN marker starting in the last bytes before a window's limit ends past the limit.
         chunk = 4096
-        overlap = max(len(PEM_BEGIN) + MAX_PEM_BODY + len(PEM_END), MAX_DER_CANDIDATE)
+        overlap = max(
+            len(b"-----BEGIN TRUSTED CERTIFICATE-----") + MAX_PEM_BODY + len(b"-----END TRUSTED CERTIFICATE-----"),
+            MAX_DER_CANDIDATE,
+        )
         edge = -(-(overlap + 1) // chunk) * chunk - overlap  # the limit of the first window
         entries = load_distrust([self.list_path], [])
         blocks = {
