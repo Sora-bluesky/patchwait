@@ -15,7 +15,8 @@ import unittest
 from collections.abc import Sequence
 
 from patchwait.cli import main
-from patchwait.der import DerError, parse_certificate
+from patchwait.der import OID_CTL_DISALLOWED_FILETIME, OID_CTL_NOT_BEFORE_FILETIME, DerError, parse_certificate
+from patchwait.ledger import render_document
 from patchwait.model import Found, JSONObject, NotFound, Reason, Undetermined
 from patchwait.roots import (
     AUTHROOT_VALUE,
@@ -43,6 +44,7 @@ from tests.cert_builder import (
     build_ctl,
     disallowed_attribute,
     not_before_attribute,
+    octets,
     pem,
     seq,
     spki_of,
@@ -839,6 +841,79 @@ class WindowsTests(RootsCase):
 
     def by_kind(self, doc: dict[str, object]) -> dict[str, dict[str, object]]:
         return {str(i["location_kind"]): i for i in self.items(doc)}
+
+    def check_disallowed_values(self, values: Sequence[bytes | None], expected: str) -> dict[str, object]:
+        subjects = [subject_for(BAD, [] if raw is None else [(OID_CTL_DISALLOWED_FILETIME, raw)]) for raw in values]
+        blob = build_ctl(subjects)
+        self.windows.registry[AUTHROOT_VALUE] = blob
+        self.windows.registry[DISALLOWED_VALUE] = blob
+        code, doc = self.run_roots("--distrust", self.list_path, "--windows")
+        self.assertEqual(code, 10 if expected == "found" else 0)
+        kinds = self.by_kind(doc)
+        authroot = kinds["authroot_ctl"]
+        verdict = self.verdict(authroot)
+        self.assertEqual(verdict["result"], expected)
+        if expected == "undetermined":
+            self.assertEqual(verdict["reason"], Reason.MALFORMED_CTL.value)
+            self.assertIn(OID_CTL_DISALLOWED_FILETIME, str(verdict["detail"]))
+        else:
+            self.assertEqual(verdict, {"result": expected, **({"value": ["sha256"]} if expected == "found" else {})})
+        matches = authroot["matches"]
+        assert isinstance(matches, list)
+        self.assertEqual(len(matches), len(values))
+        for match, raw in zip(matches, values, strict=True):  # pyright: ignore[reportUnknownVariableType]
+            self.assertEqual(match["matched_by"], "sha256")
+            self.assertEqual(match["cert_sha256"], sha256(BAD))
+            self.assertIsNone(match["not_before"])
+            if raw is None:
+                self.assertIsNone(match["disallowed"])
+            else:
+                self.assertEqual(match["disallowed"]["raw"], raw.hex())
+                if raw in (b"\x04\x00", octets(b"x")):
+                    self.assertEqual(match["disallowed"], {"filetime": None, "raw": raw.hex()})
+        self.assertEqual(self.verdict(kinds["disallowed_ctl"]), {"result": "found", "value": ["sha256"]})
+        self.assertEqual(kinds["disallowed_ctl"]["matches"], matches)
+        self.assertIn(expected, str(render_document(doc, "synthetic")))
+        return authroot
+
+    def test_empty_disallowed_filetime_stays_found(self) -> None:
+        row = self.check_disallowed_values([b"\x04\x00"], "found")
+        self.assertEqual(row["matches"][0]["disallowed"], {"filetime": None, "raw": "0400"})  # pyright: ignore[reportIndexIssue]
+
+    def test_unreadable_disallowed_filetime_is_undetermined(self) -> None:
+        for raw in (octets(b"x"), octets(b"x" * 7), octets(b"x" * 9), seq(),
+                    octets(b"\xff" * 8), octets(b"\0" * 8) + octets(b"")):
+            with self.subTest(raw=raw.hex()):
+                row = self.check_disallowed_values([raw], "undetermined")
+                self.assertEqual(row["matches"][0]["disallowed"], {"filetime": None, "raw": raw.hex()})  # pyright: ignore[reportIndexIssue]
+
+    def test_dated_disallowed_filetime_stays_not_found(self) -> None:
+        raw = disallowed_attribute(WHEN)[1]
+        row = self.check_disallowed_values([raw], "not_found")
+        self.assertEqual(row["matches"][0]["disallowed"], {"filetime": "2026-04-15T00:00:00Z", "raw": raw.hex()})  # pyright: ignore[reportIndexIssue]
+
+    def test_future_disallowed_filetime_stays_not_found(self) -> None:
+        raw = disallowed_attribute(WHEN.replace(year=9999))[1]
+        row = self.check_disallowed_values([raw], "not_found")
+        self.assertEqual(row["matches"][0]["disallowed"], {"filetime": "9999-04-15T00:00:00Z", "raw": raw.hex()})  # pyright: ignore[reportIndexIssue]
+
+    def test_duplicate_disallowed_filetime_precedence(self) -> None:
+        cases = ((None, "found"), (b"\x04\x00", "found"), (octets(b"x"), "undetermined"),
+                 (disallowed_attribute(WHEN)[1], "not_found"))
+        for left, left_result in cases:
+            for right, right_result in cases:
+                expected = next(result for result in ("found", "undetermined", "not_found")
+                                if result in (left_result, right_result))
+                with self.subTest(left=left, right=right):
+                    self.check_disallowed_values([left, right], expected)
+
+    def test_empty_not_before_stays_found(self) -> None:
+        self.authroot(subject_for(BAD, [(OID_CTL_NOT_BEFORE_FILETIME, b"\x04\x00")]))
+        code, doc = self.run_roots("--distrust", self.list_path, "--windows")
+        self.assertEqual(code, 10)
+        row = self.by_kind(doc)["authroot_ctl"]
+        self.assertEqual(self.verdict(row), {"result": "found", "value": ["sha256"]})
+        self.assertEqual(row["matches"][0]["not_before"], {"filetime": None, "raw": "0400"})  # pyright: ignore[reportIndexIssue]
 
     def test_listed_in_authroot_is_found_with_this_update(self) -> None:
         self.authroot(subject_for(OTHER), subject_for(BAD))

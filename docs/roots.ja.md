@@ -200,8 +200,16 @@ Windows 以外ではこれらの欄はなく、Windows の項目は `undetermine
 `distrust` 側（Disallowed）の `found` は良い結果です。
 この側の `not_found` は、比較できたうえで一覧に載っていないという意味です。
 
-- AuthRoot の項目に Microsoft の「無効にした日時」の属性があれば、`trust` 側では `not_found` にして、日時を `matches[].disallowed` に載せます。
+- AuthRoot で一致した項目は、Microsoft の「無効にした日時」の属性（`.11.104`）を下表のとおりに判定します。`matches[].disallowed` には生の値と、解読できた日時（解読できなければ `null`）を残します。
 「NotBefore」の制限は `found` のまま、制限を `matches[].not_before` に載せます。
+
+| AuthRoot の `.11.104` の値 | 結果 |
+|---|---|
+| 属性なし、または空の OCTET STRING（正確に `04 00`） | `found` |
+| 解読できる日時（未来の日時も含む） | `not_found` |
+| それ以外の解読できない値 | 属性名を示した `undetermined` / `malformed_ctl` |
+
+複数の一致がある場合、無効にされていない一致が1つでもあれば `found`、なければ解読不能な値があると `undetermined`、それ以外は `not_found` です。Disallowed 側は、一致があれば従来どおり `found` です。
 
 - 一致がないとき、一部の証明書が読めなかった束・バイナリ・証明書ストアは `undetermined`（`malformed_cert`）、PEM からも生の DER からも証明書を1枚も認識できなかった束・バイナリは `undetermined`（`no_certs_recognised`）です。
 数えなかった空の PEM の組は、どちらにも含めません。

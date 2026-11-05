@@ -1056,6 +1056,7 @@ def _judge_ctl_entry(
         return item(Undetermined(Reason.NO_USABLE_IDENTIFIER, "a CTL is matched by sha1 or sha256 only"))
     matches: list[JSONObject] = []
     active: list[JSONObject] = []  # matches not taken out by .11.104
+    unreadable_disallowed = False
     undecidable = 0
     for subject in subjects:
         cert_sha256 = ctl_sha256(subject)
@@ -1078,10 +1079,16 @@ def _judge_ctl_entry(
                 "not_before": _filetime(subject, OID_CTL_NOT_BEFORE_FILETIME),
             }
             matches.append(match)
-            if match["disallowed"] is None:
+            disallowed = match["disallowed"]
+            if disallowed is None or subject.attributes.get(OID_CTL_DISALLOWED_FILETIME) == b"\x04\x00":
                 active.append(match)
+            elif isinstance(disallowed, dict) and disallowed["filetime"] is None:
+                unreadable_disallowed = True
     role = _ROLE[kind]
     if role is Role.TRUST and matches and not active:
+        if unreadable_disallowed:
+            detail = f"{OID_CTL_DISALLOWED_FILETIME} (disallowed since) could not be decoded as FILETIME"
+            return item(Undetermined(Reason.MALFORMED_CTL, detail), matches)
         return item(NotFound(), matches)  # listed, but taken out (.11.104)
     if matches:
         return item(Found(_methods(matches)), matches)

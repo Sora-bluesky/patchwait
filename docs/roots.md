@@ -208,8 +208,16 @@ Without Windows, these fields are absent and Windows items are `undetermined` / 
   It does not prove that a given program uses that place.
   On the `distrust` side (Disallowed) `found` is good; `not_found` means the entry was compared and is not listed.
 
-- An AuthRoot entry with Microsoft's "disallowed since" property is reported as `not_found` on the trust side, with the date in `matches[].disallowed`.
+- For an AuthRoot match, Microsoft's "disallowed since" property (`.11.104`) determines the trust-side result below. `matches[].disallowed` retains the raw value and the decoded date, or `null` when it cannot be decoded.
   A "not before" restriction keeps it `found` and shows the restriction in `matches[].not_before`.
+
+| AuthRoot `.11.104` value | Result |
+|---|---|
+| Absent or exactly an empty OCTET STRING (`04 00`) | `found` |
+| Decodable date, including a future date | `not_found` |
+| Any other unreadable value | `undetermined` / `malformed_ctl`, naming the attribute |
+
+For multiple matches, any match not taken out gives `found`; otherwise an unreadable value gives `undetermined`; otherwise the result is `not_found`. On the Disallowed side, any match remains `found`.
 
 - With no match, a bundle, binary or certificate store that had some unreadable certificates is `undetermined` (`malformed_cert`), and a bundle or binary in which no certificate was recognised at all, from PEM or raw DER, is `undetermined` (`no_certs_recognised`).
   Ignored empty PEM blocks count toward neither.
