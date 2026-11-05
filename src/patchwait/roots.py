@@ -52,8 +52,6 @@ AUTOUPDATE_KEY = r"SOFTWARE\Microsoft\SystemCertificates\AuthRoot\AutoUpdate"
 AUTHROOT_VALUE = "EncodedCtl"
 DISALLOWED_VALUE = "DisallowedCertEncodedCtl"
 
-PEM_BEGIN = b"-----BEGIN CERTIFICATE-----"
-PEM_END = b"-----END CERTIFICATE-----"
 MAX_PEM_BODY = 64 * 1024  # a root certificate is a few KiB of base64
 CHUNK_SIZE = 4 * 1024 * 1024
 MAX_DER_FILE = 1024 * 1024  # a single DER .cer read whole
@@ -77,6 +75,8 @@ _DER_CANDIDATE_RE = re.compile(rb"\x30\x82(?=..\x30[\x81\x82])", re.DOTALL)
 _PEM_LABEL_RE = re.compile(rb"-----BEGIN ([A-Z0-9 ]{1,64})-----")
 _PEM_LABEL_OVERLAP = 80  # longer than any label marker the regex accepts
 _CERT_LABELS = frozenset({b"CERTIFICATE", b"TRUSTED CERTIFICATE", b"X509 CERTIFICATE"})
+_CERT_MARKERS = {b"-----BEGIN " + label + b"-----": b"-----END " + label + b"-----" for label in _CERT_LABELS}
+_CERT_BEGIN_RE = re.compile(b"|".join(re.escape(marker) for marker in sorted(_CERT_MARKERS)))
 
 _PEM_SUFFIXES = (".pem", ".crt", ".cer")
 _PEM_PREFIXES = ("cacert", "ca-bundle")
@@ -230,6 +230,8 @@ def _add_pem(merger: _Merger, path: str) -> None:
             data = handle.read(MAX_DER_FILE + 1)
     except OSError as error:
         raise RootsUsageError(f"--distrust-pem {path!r}: {type(error).__name__}") from error
+    if len(data) > MAX_DER_FILE:
+        raise RootsUsageError(f"--distrust-pem {path!r}: exceeds {MAX_DER_FILE} bytes")
     scanned = scan_stream(_BytesReader(data), ())
     if scanned.malformed or scanned.ignored_total or not scanned.certs:
         raise RootsUsageError(f"--distrust-pem {path!r}: needs well-formed PEM certificates only")
@@ -452,7 +454,8 @@ def scan_stream(
     sink it is kept in ``certs``.
     """
     overlap = max(
-        [len(PEM_BEGIN) + MAX_PEM_BODY + len(PEM_END), MAX_DER_CANDIDATE] + [len(needle) for needle in needles]
+        [MAX_PEM_BODY + max(len(begin) + len(end) for begin, end in _CERT_MARKERS.items()), MAX_DER_CANDIDATE]
+        + [len(needle) for needle in needles]
     )
     result = StreamScan([], 0, 0, {})
     emit: CertSink = sink if sink is not None else lambda cert, offset, _der: result.certs.append((cert, offset))
@@ -477,12 +480,15 @@ def _scan_window(
     buffer: bytes, base: int, limit: int, needles: Sequence[bytes], result: StreamScan, emit: CertSink
 ) -> None:
     # A marker starting just before ``limit`` ends past it: search that far, keep starts below ``limit``.
-    stop = min(len(buffer), limit + len(PEM_BEGIN) - 1)
-    pos = buffer.find(PEM_BEGIN, 0, stop)
-    while pos != -1:
+    stop = min(len(buffer), limit + max(map(len, _CERT_MARKERS)) - 1)
+    for match in _CERT_BEGIN_RE.finditer(buffer, 0, stop):
+        pos = match.start()
+        if pos >= limit:
+            break
         result.blocks += 1
-        body_start = pos + len(PEM_BEGIN)
-        end = buffer.find(PEM_END, body_start, body_start + MAX_PEM_BODY + len(PEM_END))
+        body_start = match.end()
+        end_marker = _CERT_MARKERS[match.group()]
+        end = buffer.find(end_marker, body_start, body_start + MAX_PEM_BODY + len(end_marker))
         if end != -1 and _is_empty_pem_body(buffer[body_start:end]):
             result.ignored_total += 1  # a template, not a certificate
             if len(result.ignored) < MAX_IGNORED_LISTED:
@@ -492,6 +498,13 @@ def _scan_window(
             cert: CertInfo | None = None
             if der is not None:
                 try:
+                    if match.group() == b"-----BEGIN TRUSTED CERTIFICATE-----":
+                        certificate = read_tlv(der, 0)
+                        if certificate.end < len(der):
+                            aux = read_tlv(der, certificate.end)
+                            if aux.tag != TAG_SEQUENCE or aux.end != len(der):
+                                raise DerError("expected one trailing SEQUENCE")
+                        der = der[:certificate.end]
                     cert = parse_certificate(der)
                 except DerError:
                     cert = None
@@ -500,7 +513,6 @@ def _scan_window(
             else:
                 result.pem_certs += 1
                 emit(cert, base + pos, False)
-        pos = buffer.find(PEM_BEGIN, pos + 1, stop)
     for index, needle in enumerate(needles):
         if not needle:
             continue

@@ -69,6 +69,7 @@ DER encodes them as bytes.
 SPKI (SubjectPublicKeyInfo) is the certificate's public-key structure.
 
 - `--distrust-pem FILE` takes the distrusted certificates themselves.
+  The size limit is 1 MiB (1,048,576 bytes). Larger files are refused.
   patchwait derives the SHA-256 and SHA-1 of the certificate, and the SHA-256 of its public key (SPKI).
   A match on the SPKI with a different certificate hash means a reissued or cross-signed certificate with the same key.
 It also derives `signature_hash` (when the signature digest is known) and `public_key_md5` for the Windows Disallowed list, as described below.
@@ -82,6 +83,10 @@ The bare form with a label is the preset format of [trust-store-audit](https://g
 Lines with the same label are merged into one entry, and both options can be used together.
 
 ## Read PEM bundles and binaries
+
+PEM reading accepts `CERTIFICATE`, `TRUSTED CERTIFICATE`, and `X509 CERTIFICATE` labels.
+The BEGIN and END labels must match.
+For `TRUSTED CERTIFICATE`, trust settings are ignored. Only the certificate is matched.
 
 - `--pem FILE` and `--pem-root DIR` read PEM bundles, or a single DER certificate.
   `--pem-root` walks for `*.pem`, `*.crt`, `*.cer`, `cacert*`, `roots.pem` and `ca-bundle*`, and does not follow symbolic links or junctions to directories below the root (they are counted in `skipped_reparse_points`).
@@ -98,13 +103,13 @@ When the list came from `--distrust-pem`, it also looks for the raw DER of each 
 Such a hit inside a DER certificate that already matched the same entry is not reported a second time.
 The file is read in chunks, so large binaries are fine.
 
-- Some PEM `BEGIN CERTIFICATE` / `END CERTIFICATE` pairs contain only whitespace, NUL bytes, or literal `\n`, `\r`, and `\t` escapes.
+- Some PEM blocks with any of these three labels contain only whitespace, NUL bytes, or literal `\n`, `\r`, and `\t` escapes between matching BEGIN and END markers.
 Each escape is a backslash and a letter, as in a string literal.
 These are templates, such as format strings, rather than broken certificates.
 It is not counted as `malformed` and is listed in `details.ignored_pem_blocks` with its offset and `reason: empty_pem_block`.
 Up to 20 are listed; with more, `details.ignored_pem_blocks_total` gives the full count.
 
-- `details` for a binary: `pem_blocks` (PEM certificate markers seen), `certs` (certificates parsed from PEM), `der_certs` (raw DER certificates parsed), `malformed` (PEM blocks that could not be parsed) and `ignored_pem_blocks`.
+- `details` for a binary: `pem_blocks` (BEGIN markers seen for the three certificate labels), `certs` (certificates parsed from PEM), `der_certs` (raw DER certificates parsed), `malformed` (PEM blocks that could not be parsed) and `ignored_pem_blocks`.
   A bundle has the same keys without `der_certs`, and `ignored_pem_blocks` only when it has some.
 
 ## Read Java keystores
