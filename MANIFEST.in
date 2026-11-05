@@ -1,0 +1,4 @@
+include tests/*.py
+include tools/publish_check.py tools/publish-allowlist.txt
+include .githooks/chain.sh .githooks/commit-msg .githooks/pre-commit .githooks/pre-push
+global-exclude *.py[cod]
