@@ -30,7 +30,7 @@ patchwait reads versions and looks for the certificates you supply in these plac
 patchwait makes no network requests and does not execute the files it inspects.
 It writes only reports requested with `--out` and the waitlist file passed to `waitlist record`.
 
-Status: early (0.2.1). Not published to PyPI.
+Status: early (0.2.2). Not published to PyPI.
 
 ## What it does
 
