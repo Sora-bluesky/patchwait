@@ -31,10 +31,7 @@ from patchwait.der import (
     TAG_BIT_STRING,
     TAG_CONTEXT_0,
     TAG_INTEGER,
-    TAG_OCTET_STRING,
-    TAG_OID,
     TAG_SEQUENCE,
-    TAG_UTF8_STRING,
     CertInfo,
     CtlEntry,
     DerError,
@@ -479,55 +476,6 @@ def scan_stream(
             return result
 
 
-def _validate_aux(buf: bytes, pos: int) -> None:
-    """Check the ordered optional fields of OpenSSL's X509_CERT_AUX."""
-    def oid_end(pos: int, limit: int) -> int:
-        oid = read_tlv(buf, pos, limit)
-        if oid.tag != TAG_OID or oid.start == oid.end:
-            raise DerError("expected an OID")
-        arc_start = True
-        for byte in buf[oid.start : oid.end]:
-            if arc_start and byte == 0x80:
-                raise DerError("nonminimal OID")
-            arc_start = not byte & 0x80
-        if not arc_start:
-            raise DerError("truncated OID")
-        return oid.end
-
-    aux = read_tlv(buf, pos)
-    if aux.tag != TAG_SEQUENCE or aux.end != len(buf):
-        raise DerError("expected one trailing SEQUENCE")
-    pos = aux.start
-    other_tag = TAG_CONTEXT_0 + 1
-    for tag in (TAG_SEQUENCE, TAG_CONTEXT_0, TAG_UTF8_STRING, TAG_OCTET_STRING, other_tag):
-        if pos == aux.end:
-            break
-        field = read_tlv(buf, pos, aux.end)
-        if field.tag != tag:
-            continue
-        if tag in (TAG_SEQUENCE, TAG_CONTEXT_0, other_tag):
-            cursor = field.start
-            while cursor < field.end:
-                if tag == other_tag:
-                    algorithm = read_tlv(buf, cursor, field.end)
-                    if algorithm.tag != TAG_SEQUENCE:
-                        raise DerError("expected an AlgorithmIdentifier")
-                    end = oid_end(algorithm.start, algorithm.end)
-                    if end < algorithm.end:
-                        parameter = read_tlv(buf, end, algorithm.end)
-                        if parameter.tag == 0x05 and parameter.start != parameter.end:  # NULL
-                            raise DerError("nonempty NULL parameter")
-                        end = parameter.end
-                    if end != algorithm.end:
-                        raise DerError("extra AlgorithmIdentifier fields")
-                    cursor = algorithm.end
-                else:
-                    cursor = oid_end(cursor, field.end)
-        pos = field.end
-    if pos != aux.end:
-        raise DerError("unexpected certificate auxiliary fields")
-
-
 def _scan_window(
     buffer: bytes, base: int, limit: int, needles: Sequence[bytes], result: StreamScan, emit: CertSink
 ) -> None:
@@ -553,7 +501,9 @@ def _scan_window(
                     if match.group() == b"-----BEGIN TRUSTED CERTIFICATE-----":
                         certificate = read_tlv(der, 0)
                         if certificate.end < len(der):
-                            _validate_aux(der, certificate.end)
+                            aux = read_tlv(der, certificate.end)
+                            if aux.tag != TAG_SEQUENCE or aux.end != len(der):
+                                raise DerError("expected one trailing SEQUENCE")
                         der = der[:certificate.end]
                     cert = parse_certificate(der)
                 except DerError:
