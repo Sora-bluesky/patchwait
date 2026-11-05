@@ -6,6 +6,7 @@ LICENSE
 README.md
 README.ja.md
 pyproject.toml
+MANIFEST.in
 .gitignore
 src/patchwait/**/*.py
 tests/**/*.py
