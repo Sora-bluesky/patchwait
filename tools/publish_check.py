@@ -13,6 +13,8 @@ Subcommands:
   revs [--remote NAME] [--url URL] OLD NEW
                     print the rev-list arguments range would check, on one
                     line (pre-push passes them to gitleaks as --log-opts)
+                    range and revs reject a NEW that is not a commit, such
+                    as an annotated tag: push lightweight tags only
   all               check every commit reachable from any ref
 
 Remote-tracking refs (refs/remotes/NAME/*) reflect NAME's fetch URL, so they
@@ -301,13 +303,14 @@ def load_markers(path: str) -> list[Marker]:
 
 
 def _decodings(data: bytes) -> list[tuple[str, str]]:
-    views = [("utf-8", data.decode("utf-8", "replace"))]
-    # UTF-16-LE at both byte alignments, so a marker in any wide string is seen.
-    for offset in (0, 1):
-        chunk = data[offset:]
-        chunk = chunk[: len(chunk) - (len(chunk) % 2)]
-        if chunk:
-            views.append(("utf-16-le", chunk.decode("utf-16-le", "replace")))
+    views = [("utf-8", data.decode("utf-8", "replace")), ("cp932", data.decode("cp932", "replace"))]
+    # UTF-16 in both byte orders and at both byte alignments, so a marker in any wide string is seen.
+    for encoding in ("utf-16-le", "utf-16-be"):
+        for offset in (0, 1):
+            chunk = data[offset:]
+            chunk = chunk[: len(chunk) - (len(chunk) % 2)]
+            if chunk:
+                views.append((encoding, chunk.decode(encoding, "replace")))
     return views
 
 
@@ -540,6 +543,9 @@ def range_args(old: str, new: str, remote: str | None = None, url: str | None = 
         return []  # deleting a remote ref publishes nothing
     if not git_ok(["cat-file", "-e", f"{new}^{{commit}}"]):
         raise CheckError(f"unknown commit {new}")
+    # An annotated tag carries a message and a tagger that the commit checks never read.
+    if git(["cat-file", "-t", new]).strip() != b"commit":
+        raise CheckError("push only direct commits; annotated tags and other objects are rejected")
     if ZERO_SHA_RE.match(old) or not git_ok(["cat-file", "-e", f"{old}^{{commit}}"]):
         # New remote ref, or the remote tip is not known locally: check what the
         # push target's remote-tracking refs do not have, when they describe the
