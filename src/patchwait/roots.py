@@ -844,7 +844,7 @@ def audit_pem_root(root: str, entries: Sequence[DistrustEntry]) -> list[RootsIte
     for path in audited:
         items += audit_pem(path, entries)
     for directory in errors:
-        items += _all_undetermined(directory, kind, entries, Reason.FILE_UNREADABLE, "directory could not be listed")
+        items += _all_undetermined(directory, kind, entries, Reason.FILE_UNREADABLE, "could not be listed or checked for links")
     if skipped or skipped_reparse or (not audited and not errors):
         details: JSONObject = {"files": len(audited)}
         if skipped:

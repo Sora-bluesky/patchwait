@@ -766,6 +766,17 @@ class HookTests(RepoCase):
         self.assertNotEqual(rc, 0)
         self.assertIn("leaks found", out)
 
+    def test_pre_push_rejects_annotated_tag(self) -> None:
+        base = self.commit({"src/a.py": b"ok\n"})
+        self.git("tag", "-a", "v9", "-m", "release", base)
+        tag = self.git("rev-parse", "refs/tags/v9")
+        rc, out = self.push(f"refs/tags/v9 {tag} refs/tags/v9 {ZERO}\n")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("annotated tags", out)
+        self.git("tag", "v8", base)
+        rc, out = self.push(f"refs/tags/v8 {base} refs/tags/v8 {ZERO}\n")
+        self.assertEqual(rc, 0, out)
+
     def test_pre_push_gitleaks_skips_commits_already_on_remote(self) -> None:
         leaky = self.commit({"src/a.py": f'token = "{FAKE_TOKEN}"\n'.encode()})
         fixed = self.commit({"src/a.py": b"ok\n"}, leaky)
