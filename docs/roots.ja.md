@@ -84,9 +84,11 @@ hex の中のコロンは受け付け、空行と `#` の行は飛ばします�
 
 - `--pem FILE` と `--pem-root DIR` は、PEM の束か、DER の証明書1枚を読みます。
 `--pem-root` は `*.pem`・`*.crt`・`*.cer`・`cacert*`・`roots.pem`・`ca-bundle*` を探して歩きます。
-根より下のディレクトリへのシンボリックリンクと junction はたどらず、`skipped_reparse_points` に数えます。
+根より下のシンボリックリンク・junction・その他の reparse point は、ディレクトリへのものも束のファイルへのものもたどらず、`skipped_reparse_points` に数えます。
 歩いて見つけたファイルのうち、PEM の中身が証明書以外（鍵や CRL）だけのものは飛ばします。
 飛ばした数は、そのディレクトリの `pem_root` の項目に出します。
+読んだファイルが1つも無いとき（束の名前のファイルが無い、またはすべて飛ばした）は、その項目を `--pem` で証明書が無いときと同じく `undetermined`（`no_certs_recognised`）にします。
+`PKCS7`・`PKCS #7 SIGNED DATA`・`CMS` のブロックを含むファイルは、ブロックの中の証明書を読まないので、ファイルのどれかの証明書が一致しない限り `undetermined` にします。
 
 - `--binary FILE` は、PEM の文字列と生の DER として組み込まれたルートを探します。
 生の DER の証明書は、外側の SEQUENCE の長さが2バイト（およそ 260 バイトから 64 KiB）で、中の tbsCertificate が 128 バイト以上のものを認識します。
