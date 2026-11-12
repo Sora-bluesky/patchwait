@@ -72,9 +72,11 @@ _EMPTY_PEM_BODY_RE = re.compile(rb"(?:[ \t\r\n\x00]|\\[rnt])*")
 # two starts are never one byte apart, since buf[p + 1] is 0x82, never 0x30.
 _DER_CANDIDATE_RE = re.compile(rb"\x30\x82(?=..\x30[\x81\x82])", re.DOTALL)
 
-_PEM_LABEL_RE = re.compile(rb"-----BEGIN ([A-Z0-9 ]{1,64})-----")
+_PEM_LABEL_RE = re.compile(rb"-----BEGIN ([A-Z0-9 #]{1,64})-----")
 _PEM_LABEL_OVERLAP = 80  # longer than any label marker the regex accepts
 _CERT_LABELS = frozenset({b"CERTIFICATE", b"TRUSTED CERTIFICATE", b"X509 CERTIFICATE"})
+# Containers that can hold certificates patchwait does not read; a file with one cannot prove absence.
+_CONTAINER_LABELS = frozenset({b"PKCS7", b"PKCS #7 SIGNED DATA", b"CMS"})
 _CERT_MARKERS = {b"-----BEGIN " + label + b"-----": b"-----END " + label + b"-----" for label in _CERT_LABELS}
 _CERT_BEGIN_RE = re.compile(b"|".join(re.escape(marker) for marker in sorted(_CERT_MARKERS)))
 
@@ -709,12 +711,18 @@ def audit_pem(path: str, entries: Sequence[DistrustEntry], chunk_size: int = CHU
                     scanned.malformed += 1
                 else:
                     sink(cert, 0, True)
+        containers = read_pem_labels(path, chunk_size) & _CONTAINER_LABELS
     except OSError as error:
         return _all_undetermined(path, kind, entries, Reason.FILE_UNREADABLE, type(error).__name__)
     details: JSONObject = {"pem_blocks": scanned.blocks, "certs": parsed, "malformed": scanned.malformed}
     if scanned.ignored_total:
         details.update(_ignored_details(scanned))
-    return _collection_items(path, kind, entries, matches, parsed, scanned.malformed, details, require_certs=True)
+    items = _collection_items(path, kind, entries, matches, parsed, scanned.malformed, details, require_certs=True)
+    if containers:
+        labels = ", ".join(sorted(label.decode() for label in containers))
+        unread = Undetermined(Reason.NO_CERTS_RECOGNISED, f"certificates inside {labels} blocks were not read")
+        items = [item if isinstance(item.verdict, Found) else replace(item, verdict=unread) for item in items]
+    return items
 
 
 def audit_keystore(path: str, entries: Sequence[DistrustEntry]) -> list[RootsItem]:
@@ -755,11 +763,11 @@ def is_bundle_name(name: str) -> bool:
 
 def find_bundles(root: str) -> tuple[list[str], list[str], int]:
     """Bundle files under ``root``, the directories that could not be listed, and
-    how many directory symlinks and junctions were skipped.
+    how many symlinks, junctions and other reparse points were skipped.
 
     The walk is depth-first with entries sorted by name, and a directory's files
-    come before its subdirectories. The root itself is always entered; a symlink
-    or junction to a directory below it is not. ``root`` is put in
+    come before its subdirectories. The root itself is always entered; a reparse
+    point below it, to a directory or to a bundle file, is not. ``root`` is put in
     ``os.path.normpath`` form first, so the joined paths never mix separators.
     """
     root = os.path.normpath(root)
@@ -781,9 +789,7 @@ def find_bundles(root: str) -> tuple[list[str], list[str], int]:
                 is_dir = entry.is_dir()
             except OSError:
                 is_dir = False
-            if not is_dir:
-                if is_bundle_name(entry.name):
-                    files.append(entry.path)
+            if not is_dir and not is_bundle_name(entry.name):
                 continue
             try:
                 reparse = is_reparse_point(entry)
@@ -792,28 +798,37 @@ def find_bundles(root: str) -> tuple[list[str], list[str], int]:
                 continue
             if reparse:
                 skipped += 1
-            else:
+            elif is_dir:
                 subdirs.append(entry.path)
+            else:
+                files.append(entry.path)
         stack.extend(reversed(subdirs))
     return files, errors, skipped
 
 
+def read_pem_labels(path: str, chunk_size: int = CHUNK_SIZE) -> set[bytes]:
+    """The labels of the PEM BEGIN markers in the file. Raises ``OSError``."""
+    labels: set[bytes] = set()
+    tail = b""
+    with open(path, "rb") as handle:
+        while chunk := handle.read(max(1, chunk_size)):
+            window = tail + chunk
+            labels.update(match.group(1) for match in _PEM_LABEL_RE.finditer(window))
+            tail = window[-_PEM_LABEL_OVERLAP:]
+    return labels
+
+
 def is_key_only(path: str, chunk_size: int = CHUNK_SIZE) -> bool:
-    """True if the file has PEM blocks and none of them is a certificate.
+    """True if the file has PEM blocks and none of them is a certificate or a
+    certificate container (PKCS7, CMS).
 
     An unreadable file is not key-only: it is left to the audit to report.
     """
-    labels: set[bytes] = set()
-    tail = b""
     try:
-        with open(path, "rb") as handle:
-            while chunk := handle.read(max(1, chunk_size)):
-                window = tail + chunk
-                labels.update(match.group(1) for match in _PEM_LABEL_RE.finditer(window))
-                tail = window[-_PEM_LABEL_OVERLAP:]
+        labels = read_pem_labels(path, chunk_size)
     except OSError:
         return False
-    return bool(labels) and labels.isdisjoint(_CERT_LABELS)
+    return bool(labels) and labels.isdisjoint(_CERT_LABELS | _CONTAINER_LABELS)
 
 
 def audit_pem_root(root: str, entries: Sequence[DistrustEntry]) -> list[RootsItem]:
@@ -829,14 +844,18 @@ def audit_pem_root(root: str, entries: Sequence[DistrustEntry]) -> list[RootsIte
     for path in audited:
         items += audit_pem(path, entries)
     for directory in errors:
-        items += _all_undetermined(directory, kind, entries, Reason.FILE_UNREADABLE, "directory could not be listed")
+        items += _all_undetermined(directory, kind, entries, Reason.FILE_UNREADABLE, "could not be listed or checked for links")
     if skipped or skipped_reparse or (not audited and not errors):
         details: JSONObject = {"files": len(audited)}
         if skipped:
             details["skipped_key_only"] = skipped
         if skipped_reparse:
             details["skipped_reparse_points"] = skipped_reparse
-        items += [RootsItem(root, kind, entry, NotFound(), (), dict(details)) for entry in entries]
+        # No file read proves nothing, as for an explicit --pem without certificates.
+        verdict: Check[tuple[str, ...]] = (
+            NotFound() if audited else Undetermined(Reason.NO_CERTS_RECOGNISED, "no bundle file was read")
+        )
+        items += [RootsItem(root, kind, entry, verdict, (), dict(details)) for entry in entries]
     return items
 
 

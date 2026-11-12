@@ -266,6 +266,27 @@ class StagedTests(RepoCase):
         self.assertIn("utf-16-le", out)
         self.assert_no_leak(out)
 
+    # ASCII in UTF-16-BE is already visible as UTF-16-LE one byte over; a Japanese marker is not.
+    JA_MARKER = "社外秘"
+
+    def test_utf16be_marker_in_binary(self) -> None:
+        markers = self.write_file(os.path.join(self.tmp, "ja-markers.txt"), self.JA_MARKER + "\n")
+        for offset in (0, 1):
+            with self.subTest(offset=offset):
+                self.stage("bin/tool.exe", b"MZ\x00"[: 2 + offset] + self.JA_MARKER.encode("utf-16-be"))
+                rc, out = self.check("staged", markers=markers)
+                self.assertEqual(rc, 1)
+                self.assertIn("bin/tool.exe: contains marker #1", out)
+                self.assertIn("utf-16-be", out)
+
+    def test_cp932_marker(self) -> None:
+        markers = self.write_file(os.path.join(self.tmp, "ja-markers.txt"), self.JA_MARKER + "\n")
+        self.stage("src/a.py", ("# " + self.JA_MARKER + "\n").encode("cp932"))
+        rc, out = self.check("staged", markers=markers)
+        self.assertEqual(rc, 1)
+        self.assertIn("src/a.py: contains marker #1", out)
+        self.assertIn("cp932", out)
+
     def test_regex_marker(self) -> None:
         self.stage("src/a.py", b"id = '" + SYNTH_ID.encode() + b"'\n")
         self.stage("src/b.py", b"id = 'local_xyz'\n")
@@ -374,6 +395,19 @@ class HistoryTests(RepoCase):
         _base, _bad, fixed = self.make_history()
         rc, _out = self.check("range", "1" * 40, fixed)
         self.assertEqual(rc, 1)
+
+    def test_range_rejects_annotated_tag(self) -> None:
+        base = self.commit({"src/a.py": b"ok\n"})
+        self.git("tag", "-a", "v9", "-m", "secret line synthuser", base)
+        tag = self.git("rev-parse", "refs/tags/v9")
+        self.assertNotEqual(tag, base)
+        for command in ("range", "revs"):
+            with self.subTest(command=command):
+                rc, out = self.check(command, ZERO, tag)
+                self.assertEqual(rc, 2)
+                self.assertIn("annotated tags", out)
+                self.assert_no_leak(out)
+        self.assertEqual(self.check("range", ZERO, self.git("tag", "v8", base) or base), (0, ""))
 
     def test_delete_push_passes(self) -> None:
         _base, _bad, fixed = self.make_history()
@@ -731,6 +765,17 @@ class HookTests(RepoCase):
         rc, out = self.push(f"refs/heads/main {fixed} refs/heads/main {'1' * 40}\n")
         self.assertNotEqual(rc, 0)
         self.assertIn("leaks found", out)
+
+    def test_pre_push_rejects_annotated_tag(self) -> None:
+        base = self.commit({"src/a.py": b"ok\n"})
+        self.git("tag", "-a", "v9", "-m", "release", base)
+        tag = self.git("rev-parse", "refs/tags/v9")
+        rc, out = self.push(f"refs/tags/v9 {tag} refs/tags/v9 {ZERO}\n")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("annotated tags", out)
+        self.git("tag", "v8", base)
+        rc, out = self.push(f"refs/tags/v8 {base} refs/tags/v8 {ZERO}\n")
+        self.assertEqual(rc, 0, out)
 
     def test_pre_push_gitleaks_skips_commits_already_on_remote(self) -> None:
         leaky = self.commit({"src/a.py": f'token = "{FAKE_TOKEN}"\n'.encode()})

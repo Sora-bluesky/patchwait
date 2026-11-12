@@ -305,9 +305,60 @@ class PemTests(RootsCase):
         )
         self.assertEqual(code, 0)
         first, second = self.items(doc)
-        self.assertEqual(self.verdict(first), {"result": "not_found"})
+        self.assertEqual(self.verdict(first)["reason"], Reason.NO_CERTS_RECOGNISED.value)
         self.assertEqual(first["details"], {"files": 0})
         self.assertEqual(self.verdict(second)["reason"], Reason.TARGET_MISSING.value)
+
+    def test_pem_root_with_no_bundle_name_is_undetermined(self) -> None:
+        self.write("tree/truststore.der", pem(BAD))
+        self.write("tree/ca.bundle", pem(BAD))
+        code, doc = self.run_roots("--distrust", self.list_path, "--pem-root", os.path.join(self.dir, "tree"))
+        self.assertEqual(code, 0)
+        item, verdict = self.only(doc)
+        self.assertEqual(verdict["reason"], Reason.NO_CERTS_RECOGNISED.value)
+        self.assertEqual(item["details"], {"files": 0})
+
+    PKCS7_BLOCK = b"-----BEGIN PKCS7-----\nMIIBAAAA\n-----END PKCS7-----\n"
+    CMS_BLOCK = b"-----BEGIN CMS-----\nMIIBAAAA\n-----END CMS-----\n"
+    PKCS7_SIGNED_BLOCK = b"-----BEGIN PKCS #7 SIGNED DATA-----\nMIIBAAAA\n-----END PKCS #7 SIGNED DATA-----\n"
+
+    def test_pem_with_certificate_and_container_is_undetermined(self) -> None:
+        for block in (self.PKCS7_BLOCK, self.CMS_BLOCK, self.PKCS7_SIGNED_BLOCK):
+            with self.subTest(block=block[:30]):
+                path = self.write("bundle.pem", pem(OTHER) + block)
+                code, doc = self.run_roots("--distrust", self.list_path, "--pem", path)
+                self.assertEqual(code, 0)
+                _item, verdict = self.only(doc)
+                self.assertEqual(verdict["reason"], Reason.NO_CERTS_RECOGNISED.value)
+
+    def test_pem_with_container_keeps_a_match_found(self) -> None:
+        path = self.write("bundle.pem", pem(BAD) + self.PKCS7_BLOCK)
+        code, doc = self.run_roots("--distrust", self.list_path, "--pem", path)
+        self.assertEqual(code, 10)
+        self.assertEqual(self.only(doc)[1]["result"], "found")
+
+    def test_pem_root_container_only_file_is_audited(self) -> None:
+        self.write("tree/roots.pem", self.PKCS7_BLOCK)
+        code, doc = self.run_roots("--distrust", self.list_path, "--pem-root", os.path.join(self.dir, "tree"))
+        self.assertEqual(code, 0)
+        item, verdict = self.only(doc)
+        self.assertEqual(os.path.basename(str(item["location"])), "roots.pem")
+        self.assertEqual(verdict["reason"], Reason.NO_CERTS_RECOGNISED.value)
+
+    def test_pem_root_does_not_follow_file_symlink(self) -> None:
+        self.write("tree/roots.pem", pem(OTHER))
+        target = self.write("outside/cacert.pem", pem(BAD))
+        root = os.path.join(self.dir, "tree")
+        try:
+            os.symlink(target, os.path.join(root, "cacert.pem"))
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f"cannot create a file symlink: {type(error).__name__}")
+        code, doc = self.run_roots("--distrust", self.list_path, "--pem-root", root)
+        self.assertEqual(code, 0)
+        located = {str(i["location"]): self.verdict(i)["result"] for i in self.items(doc)}
+        self.assertEqual(located, {os.path.join(root, "roots.pem"): "not_found", root: "not_found"})
+        summary = next(i for i in self.items(doc) if i["location"] == root)
+        self.assertEqual(summary["details"], {"files": 1, "skipped_reparse_points": 1})
 
 
     # Split so secret scanners do not flag this fake key block.

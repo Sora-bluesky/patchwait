@@ -86,12 +86,14 @@ Lines with the same label are merged into one entry, and both options can be use
 
 PEM reading accepts `CERTIFICATE`, `TRUSTED CERTIFICATE`, and `X509 CERTIFICATE` labels.
 The BEGIN and END labels must match.
+A file that also has a `PKCS7`, `PKCS #7 SIGNED DATA` or `CMS` block is `undetermined` unless one of its certificates matches, because the certificates inside those blocks are not read.
 For `TRUSTED CERTIFICATE`, trust settings are ignored. Only the certificate is matched.
 
 - `--pem FILE` and `--pem-root DIR` read PEM bundles, or a single DER certificate.
-  `--pem-root` walks for `*.pem`, `*.crt`, `*.cer`, `cacert*`, `roots.pem` and `ca-bundle*`, and does not follow symbolic links or junctions to directories below the root (they are counted in `skipped_reparse_points`).
+  `--pem-root` walks for `*.pem`, `*.crt`, `*.cer`, `cacert*`, `roots.pem` and `ca-bundle*`, and does not follow symbolic links, junctions or other reparse points below the root, whether they lead to a directory or to a bundle file (they are counted in `skipped_reparse_points`).
   Skip a walked file when all its PEM blocks contain things other than certificates, such as keys or CRLs.
   The skipped counts are reported on an extra `pem_root` item for that directory.
+  When no file was read (no file has a bundle name, or every one was skipped), that item is `undetermined` with `no_certs_recognised`, as for `--pem` with no certificate.
 
 - `--binary FILE` looks for roots embedded as PEM text and as raw DER.
 Recognise raw DER certificates whose outer SEQUENCE uses a two-byte length, about 260 bytes to 64 KiB.
